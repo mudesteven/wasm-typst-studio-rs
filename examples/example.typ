@@ -173,6 +173,6 @@ Nel testo: vedi @mia-figura per dettagli.
 = Citations Example
 
 Click "Bibliography" button to manage references.
-You can cite like this: @example2024 or @typst2023
+You can cite like this: @knuth1984 or @typst2023
 
 #bibliography("refs.yml")

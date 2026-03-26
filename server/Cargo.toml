@@ -1,0 +1,12 @@
+[package]
+name = "typst-studio-server"
+version = "0.1.0"
+edition = "2021"
+description = "Reference file server for Typst Studio - stores projects as raw files on disk"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors"] }

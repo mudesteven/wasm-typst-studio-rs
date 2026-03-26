@@ -6,8 +6,10 @@
 .preview-scroll-area {
     height: 0;
     flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: auto;
+    touch-action: none; /* Let JS handle touch gestures */
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 /* Preview content container */
@@ -62,7 +64,7 @@
     right: 0;
     bottom: 0;
     pointer-events: none;
-    overflow: auto;
+    overflow: hidden;
     white-space: pre-wrap;
     word-wrap: break-word;
     font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
@@ -96,6 +98,25 @@
 .syntax-overlay .label { color: #4FC1FF; }
 .syntax-overlay .operator { color: #D4D4D4; }
 
+/* Line number gutter */
+.line-numbers {
+    font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #555;
+    min-width: 40px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.line-number {
+    height: 1.6em;
+}
+
+[data-theme="business"] .line-numbers {
+    color: #999;
+}
+
 .typst-editor {
     position: absolute;
     top: 0;
@@ -105,7 +126,6 @@
     background: transparent;
     color: transparent;
     -webkit-text-fill-color: transparent;
-    caret-color: #fff;
     border: none;
     resize: none;
     outline: none;
@@ -117,6 +137,14 @@
     line-height: 1.6;
     padding: 8px;
     z-index: 2;
+}
+
+/* Theme-aware caret color */
+[data-theme="dark"] .typst-editor {
+    caret-color: #fff;
+}
+[data-theme="business"] .typst-editor {
+    caret-color: #000;
 }
 
 .typst-editor::placeholder {

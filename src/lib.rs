@@ -4,188 +4,183 @@ use leptos_meta::*;
 use gloo_timers::future::sleep;
 use std::time::Duration;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 use wasm_bindgen::JsCast;
 
-// Modules
 mod components;
 mod compiler;
+mod models;
+mod packages;
+mod state;
+mod storage;
+mod sync;
 mod utils;
 
-// Top-Level components
-use crate::components::{Editor, Preview, ImageGalleryDrawer};
+use crate::components::{
+    Editor, Preview, ImageGalleryDrawer, ProjectSwitcher, FileSidebar,
+    EditorTabs, HomePage,
+};
 use crate::compiler::TypstCompiler;
+use crate::state::AppState;
+use crate::state::app_state::ThemeMode;
+use crate::storage::create_storage;
+use crate::components::project_manager::sync_source_from_state;
 
-/// Typst Studio main app component
 #[component]
 pub fn App() -> impl IntoView {
-    // Provides context that manages stylesheets, titles, meta tags, etc.
     provide_meta_context();
 
-    // Theme state: true = dark, false = business (light)
-    let (is_dark_theme, set_is_dark_theme) = signal(true);
+    let storage = create_storage();
+    let app_state = AppState::new(storage);
+    provide_context(app_state.clone());
 
-    // Effect to update data-theme attribute on <html>
-    Effect::new(move |_| {
-        let theme = if is_dark_theme.get() { "dark" } else { "business" };
-
-        if let Some(window) = web_sys::window() {
-            if let Some(document) = window.document() {
-                if let Some(html) = document.document_element() {
-                    let _ = html.set_attribute("data-theme", theme);
-                }
-            }
-        }
-    });
-
-    // Editor state
-    // Load from localStorage or use default (full example.typ content)
-    const DEFAULT_SOURCE: &str = include_str!("../examples/example.typ");
-
-    let initial_source = if let Some(window) = web_sys::window() {
-        if let Ok(Some(storage)) = window.local_storage() {
-            storage
-                .get_item("typst_source")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| DEFAULT_SOURCE.to_string())
-        } else {
-            DEFAULT_SOURCE.to_string()
-        }
-    } else {
-        DEFAULT_SOURCE.to_string()
-    };
-
-    let (source, set_source) = signal(initial_source);
-
-    let (output, set_output) = signal(String::new());
-    let (error, set_error) = signal(Option::<String>::None);
-    let (is_compiling, set_is_compiling) = signal(false);
-
-    // Panel resize state (editor width percentage, default 50%)
-    let (editor_width, set_editor_width) = signal(50.0);
-    let (is_resizing, set_is_resizing) = signal(false);
-
-    // Store textarea ref for cursor position tracking
-    use leptos::html::Textarea;
-    let textarea_ref = NodeRef::<Textarea>::new();
-
-    // Bibliography YAML content - load from localStorage or use default
-    let initial_bib = r##"netwok2020:
-  type: article
-  title: "The Challenges of Scientific Typesetting in the Modern Era"
-  author: ["Network, A.", "Smith, B."]
-  date: 2020
-  journal: "Journal of Academic Publishing"
-  volume: 15
-  issue: 3
-  pages: "234-256"
-  doi: "10.1234/jap.2020.15.3.234"
-
-netwok2022:
-  type: article
-  title: "LaTeX: A Historical Perspective on Scientific Document Preparation"
-  author: ["Network, A.", "Johnson, C.", "Williams, D."]
-  date: 2022
-  journal: "Computing in Science & Engineering"
-  volume: 24
-  issue: 2
-  pages: "45-62"
-  doi: "10.1234/cise.2022.24.2.045"
-
-example2024:
-  type: article
-  title: "Example Research Paper"
-  author: ["Smith, J.", "Doe, A."]
-  date: 2024
-  journal: "Journal of Examples"
-  volume: 10
-  pages: "123-145"
-
-typst2023:
-  type: web
-  title: "Typst Documentation"
-  author: "Typst Team"
-  date: 2023
-  url: "https://typst.app"
-"##;
-
-    let loaded_bib = if let Some(window) = web_sys::window() {
-        if let Ok(Some(storage)) = window.local_storage() {
-            storage
-                .get_item("typst_bibliography")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| initial_bib.to_string())
-        } else {
-            initial_bib.to_string()
-        }
-    } else {
-        initial_bib.to_string()
-    };
-
-    let (bibliography, set_bibliography) = signal(loaded_bib);
-    let (show_bib_modal, set_show_bib_modal) = signal(false);
-
-    // Image gallery drawer state
-    let (show_image_gallery, set_show_image_gallery) = signal(false);
-
-    // In-memory image cache: image_id -> base64_data
-    // This allows synchronous access during compilation
-    let (image_cache, set_image_cache) = signal(HashMap::<String, String>::new());
-
-    // Load images from IndexedDB into cache on app start
+    // Theme: react to theme_mode signal and system preference changes
     {
-        spawn_local(async move {
-            use crate::utils::image_manager::ImageManager;
-            let manager = ImageManager::new();
-            match manager.list_all_images().await {
-                Ok(images) => {
-                    let mut cache = HashMap::new();
-                    for img in images {
-                        cache.insert(img.id, img.data);
+        let app_state = app_state.clone();
+        Effect::new(move |_| {
+            let mode = app_state.theme_mode.get();
+            let theme = mode.resolve();
+            if let Some(window) = web_sys::window() {
+                if let Some(document) = window.document() {
+                    if let Some(html) = document.document_element() {
+                        let _ = html.set_attribute("data-theme", theme);
                     }
-                    let count = cache.len();
-                    set_image_cache.set(cache);
-                    log::info!("Image cache initialized with {} images", count);
                 }
-                Err(e) => log::error!("Failed to load images: {}", e),
             }
         });
     }
 
-    // Helper function to insert text at cursor position (wrapped in Rc for sharing)
-    let insert_at_cursor = Rc::new(move |text: &str, select_text: Option<&str>| {
+    // Listen for system theme changes (for "System" mode)
+    {
+        let app_state = app_state.clone();
+        spawn_local(async move {
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(mql)) = window.match_media("(prefers-color-scheme: dark)") {
+                    let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |_: web_sys::Event| {
+                        // Re-trigger theme effect by nudging the signal
+                        let current = app_state.theme_mode.get_untracked();
+                        if current == ThemeMode::System {
+                            // Force reactivity by setting again
+                            app_state.theme_mode.set(ThemeMode::System);
+                        }
+                    }) as Box<dyn FnMut(_)>);
+                    let _ = mql.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
+                    cb.forget();
+                }
+            }
+        });
+    }
+
+    // Editor state
+    let (source, set_source) = signal(String::new());
+    let (output, set_output) = signal(String::new());
+    let (error, set_error) = signal(Option::<String>::None);
+    let (is_compiling, set_is_compiling) = signal(false);
+    let (pdf_blob_url, set_pdf_blob_url) = signal(Option::<String>::None);
+    // Cursor scroll position: ratio 0.0-1.0 of where cursor is in the document
+    let (cursor_ratio, set_cursor_ratio) = signal(0.0f64);
+    let (editor_width, set_editor_width) = signal(50.0);
+    let (is_resizing, set_is_resizing) = signal(false);
+    use leptos::html::Textarea;
+    let textarea_ref = NodeRef::<Textarea>::new();
+    let (show_bib_modal, set_show_bib_modal) = signal(false);
+    let (bib_content, set_bib_content) = signal(String::new());
+    let (show_image_gallery, set_show_image_gallery) = signal(false);
+    let (_legacy_image_cache, set_legacy_image_cache) = signal(HashMap::<String, String>::new());
+    // Track init completion to prevent auto-save from clearing content on startup
+    let (init_done, set_init_done) = signal(false);
+
+    // Initialize
+    {
+        let app_state = app_state.clone();
+        spawn_local(async move {
+            let storage = app_state.storage.clone();
+            match crate::storage::migration::migrate_if_needed(&**storage).await {
+                Ok(Some(id)) => log::info!("Migration created project: {}", id),
+                Ok(None) => {}
+                Err(e) => log::error!("Migration failed: {}", e),
+            }
+            // Create demo project if needed
+            if let Err(e) = crate::storage::migration::ensure_demo_project(&**storage).await {
+                log::error!("Failed to create demo project: {}", e);
+            }
+            // Load cached packages
+            if let Err(e) = app_state.package_cache.load_all().await {
+                log::error!("Failed to load package cache: {}", e);
+            }
+
+            // Always start on homepage for now
+            // Mark init complete so auto-save can start
+            set_init_done.set(true);
+        });
+    }
+
+    // Sync source when active file changes
+    {
+        let app_state = app_state.clone();
+        Effect::new(move |_| {
+            let active = app_state.active_file.get();
+            if let Some(path) = active {
+                let contents = app_state.file_contents.get();
+                if let Some(content) = contents.get(&path) {
+                    if source.get_untracked() != *content {
+                        set_source.set(content.clone());
+                    }
+                }
+            }
+        });
+    }
+
+    // Auto-save (gated by autosave_enabled AND init_done)
+    {
+        let app_state = app_state.clone();
+        Effect::new(move |_| {
+            let src = source.get();
+            if !init_done.get() { return; } // Don't save during initialization
+            let autosave = app_state.autosave_enabled.get();
+            let active = app_state.active_file.get_untracked();
+            if let Some(path) = active {
+                // Always update in-memory content
+                app_state.set_file_content(&path, src.clone());
+                // Only persist to storage if autosave is on
+                if autosave {
+                    if let Some(project) = app_state.current_project.get_untracked() {
+                        let storage = app_state.storage.clone();
+                        let app_state2 = app_state.clone();
+                        let path = path.clone();
+                        let src = src.clone();
+                        spawn_local(async move {
+                            let _ = storage.write_file(&project.id, &path,
+                                &crate::models::FileContent::Text(src)).await;
+                            app_state2.modified_files.update(|s| { s.remove(&path); });
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    // Insert at cursor
+    let insert_at_cursor = Arc::new(move |text: &str, select_text: Option<&str>| {
         if let Some(textarea) = textarea_ref.get() {
             let start = textarea.selection_start().unwrap_or(None).unwrap_or(0) as usize;
             let end = textarea.selection_end().unwrap_or(None).unwrap_or(0) as usize;
-
             let current = source.get_untracked();
             let before = &current[..start];
             let after = &current[end..];
-
-            // If there's selected text, wrap it
             if start != end {
                 let selected = &current[start..end];
                 let new_text = text.replace("text", selected)
-                                   .replace("Heading", selected)
-                                   .replace("Item", selected)
-                                   .replace("formula", selected)
-                                   .replace("code", selected)
-                                   .replace("citation", selected)
-                                   .replace("label", selected);
+                    .replace("Heading", selected).replace("Item", selected)
+                    .replace("formula", selected).replace("code", selected)
+                    .replace("citation", selected).replace("label", selected);
                 let new_source = format!("{}{}{}", before, new_text, after);
                 set_source.set(new_source);
-
-                // Restore selection
                 let _ = textarea.set_selection_start(Some(start as u32));
                 let _ = textarea.set_selection_end(Some((start + new_text.len()) as u32));
             } else {
-                // No selection, insert template
                 let new_source = format!("{}{}{}", before, text, after);
                 set_source.set(new_source);
-
-                // Select placeholder text if specified
                 if let Some(placeholder) = select_text {
                     if let Some(pos) = text.find(placeholder) {
                         let _ = textarea.set_selection_start(Some((start + pos) as u32));
@@ -195,450 +190,555 @@ typst2023:
                     let _ = textarea.set_selection_start(Some((start + text.len()) as u32));
                 }
             }
-
             let _ = textarea.focus();
         }
     });
 
-    // Save to localStorage on source change
-    Effect::new(move |_| {
-        let src = source.get();
-        if let Some(window) = web_sys::window() {
-            if let Ok(Some(storage)) = window.local_storage() {
-                let _ = storage.set_item("typst_source", &src);
+    // Manual compile trigger
+    let (compile_trigger, set_compile_trigger) = signal(0u32);
+
+    // Manual save
+    let on_save: Arc<dyn Fn() + Send + Sync> = {
+        let app_state = app_state.clone();
+        Arc::new(move || {
+            let active = app_state.active_file.get_untracked();
+            if let Some(path) = active {
+                let src = source.get_untracked();
+                if let Some(project) = app_state.current_project.get_untracked() {
+                    let storage = app_state.storage.clone();
+                    let app_state = app_state.clone();
+                    let path_clone = path.clone();
+                    spawn_local(async move {
+                        let _ = storage.write_file(&project.id, &path,
+                            &crate::models::FileContent::Text(src)).await;
+                        // Clear modified indicator for this file
+                        app_state.modified_files.update(|s| { s.remove(&path_clone); });
+                        log::info!("Saved: {}", path);
+                    });
+                }
             }
-        }
+        })
+    };
+
+    let on_compile: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        set_compile_trigger.update(|t| *t += 1);
     });
 
-    // Debouncing: usa un counter per identificare l'ultimo update
-    let (debounce_id, set_debounce_id) = signal(0u32);
+    // Spawn the compile worker (off main thread)
+    let compile_worker = {
+        use crate::compiler::worker::{CompileWorkerHandle, CompileResponse};
 
-    // Debounced compilation: compila dopo 500ms dall'ultimo cambiamento
-    Effect::new(move |_| {
-        let src = source.get();
-        let bib = bibliography.get();
+        let set_output = set_output.clone();
+        let set_error = set_error.clone();
+        let set_pdf_blob_url = set_pdf_blob_url.clone();
+        let app_state_w = app_state.clone();
 
-        // Incrementa l'ID per invalidare task precedenti
-        let current_id = debounce_id.get_untracked() + 1;
-        set_debounce_id.set(current_id);
+        // The worker calls this callback on the main thread when compilation finishes
+        let worker = CompileWorkerHandle::spawn(move |resp: CompileResponse| {
+            if let Some(svg) = resp.svg {
+                set_output.set(svg);
+                set_error.set(None);
 
-        spawn_local(async move {
-            // Debounce delay: aspetta 500ms
-            sleep(Duration::from_millis(500)).await;
-
-            // Compila solo se questo è ancora l'ultimo task
-            // Usa get_untracked per non creare dipendenze reattive
-            if current_id == debounce_id.get_untracked() {
-                // Set compiling state
-                set_is_compiling.set(true);
-
-                // Passa la bibliografia se non è vuota
-                let bib_option = if bib.trim().is_empty() {
-                    None
-                } else {
-                    Some(bib.as_str())
-                };
-
-                // Get current image cache
-                let images = image_cache.get_untracked();
-
-                match TypstCompiler::new()
-                    .and_then(|compiler| compiler.compile_to_svg(&src, bib_option, &images))
-                {
-                    Ok(svg) => {
-                        set_output.set(svg);
-                        set_error.set(None);
-
-                        // Auto-scroll preview to top after compilation
-                        if let Some(window) = web_sys::window() {
-                            if let Some(document) = window.document() {
-                                // Scroll the preview container to top
-                                if let Some(preview_container) = document.query_selector(".flex-1.overflow-auto.bg-base-100").ok().flatten() {
-                                    preview_container.set_scroll_top(0);
-                                }
+                // Decode PDF from base64 and create blob URL
+                if let Some(pdf_b64) = resp.pdf_base64 {
+                    if let Ok(pdf_bytes) = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD, &pdf_b64
+                    ) {
+                        let uint8 = js_sys::Uint8Array::from(&pdf_bytes[..]);
+                        let parts = js_sys::Array::new();
+                        parts.push(&uint8);
+                        let opts = web_sys::BlobPropertyBag::new();
+                        opts.set_type("application/pdf");
+                        if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts) {
+                            if let Some(old) = pdf_blob_url.get_untracked() {
+                                let _ = web_sys::Url::revoke_object_url(&old);
+                            }
+                            if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                                set_pdf_blob_url.set(Some(url));
                             }
                         }
                     }
-                    Err(e) => {
-                        log::error!("Compilation error: {}", e);
-                        set_error.set(Some(e));
-                    }
                 }
-
-                // Clear compiling state
-                set_is_compiling.set(false);
+            } else if let Some(e) = resp.error {
+                // Check for missing packages
+                let src = source.get_untracked();
+                let file_contents = app_state_w.file_contents.get_untracked();
+                let pkg_cache = app_state_w.package_cache.clone();
+                let missing = scan_all_missing_packages(&src, &file_contents, &pkg_cache);
+                if !missing.is_empty() {
+                    let pkg_names: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
+                    let msg = format!("{}\n\n[MISSING_PACKAGES:{}]", e, pkg_names.join(","));
+                    set_error.set(Some(msg));
+                } else {
+                    set_error.set(Some(e));
+                }
             }
+            set_is_compiling.set(false);
         });
-    });
+
+        if worker.is_some() {
+            log::info!("Compile worker spawned — compilation will run off main thread");
+        } else {
+            log::warn!("Web Worker not available — compilation will block the UI");
+        }
+        std::rc::Rc::new(worker)
+    };
+
+    // Debounced compilation
+    let (debounce_id, set_debounce_id) = signal(0u32);
+    let (compile_id_counter, set_compile_id_counter) = signal(0u32);
+    {
+        let app_state = app_state.clone();
+        Effect::new(move |_| {
+            let src = source.get();
+            let _trigger = compile_trigger.get();
+            if src.is_empty() { return; }
+
+            let current_id = debounce_id.get_untracked() + 1;
+            set_debounce_id.set(current_id);
+
+            // Read tracked signals for reactivity
+            let _file_ver = app_state.file_contents.get();
+            let _img_ver = app_state.image_cache.get();
+            let _pkg_ver = app_state.package_cache.packages.get();
+            let main_file = app_state.current_project.get_untracked()
+                .map(|p| p.main_file).unwrap_or_else(|| "main.typ".to_string());
+
+            let app_state2 = app_state.clone();
+            let compile_worker = compile_worker.clone(); // Clone Rc for spawn_local
+
+            spawn_local(async move {
+                sleep(Duration::from_millis(500)).await;
+                if current_id != debounce_id.get_untracked() { return; }
+
+                set_is_compiling.set(true);
+
+                // Clone data AFTER debounce
+                let file_contents = app_state2.file_contents.get_untracked();
+                let image_cache = app_state2.image_cache.get_untracked();
+                let pkg_sources = app_state2.package_cache.get_all_sources();
+                let pkg_binaries = app_state2.package_cache.get_all_binaries();
+
+                if let Some(ref worker) = *compile_worker {
+                    // OFF-THREAD: send to worker, result comes back via callback
+                    use crate::compiler::worker::{CompileRequest, serialize_pkg_sources, serialize_pkg_binaries};
+                    let req_id = compile_id_counter.get_untracked() + 1;
+                    set_compile_id_counter.set(req_id);
+                    let request = CompileRequest {
+                        id: req_id,
+                        source: src,
+                        main_file,
+                        file_contents,
+                        image_cache,
+                        pkg_sources: serialize_pkg_sources(&pkg_sources),
+                        pkg_binaries: serialize_pkg_binaries(&pkg_binaries),
+                    };
+                    worker.compile(&request);
+                    // Don't set_is_compiling(false) here — the callback does it
+                } else {
+                    // FALLBACK: compile on main thread (blocks UI)
+                    let pkg_cache = app_state2.package_cache.clone();
+                    match TypstCompiler::new()
+                        .and_then(|c| c.compile_to_both(&src, &main_file, &file_contents, &image_cache, &pkg_sources, &pkg_binaries))
+                    {
+                        Ok((svg, pdf_bytes)) => {
+                            set_output.set(svg);
+                            set_error.set(None);
+                            let uint8 = js_sys::Uint8Array::from(&pdf_bytes[..]);
+                            let parts = js_sys::Array::new();
+                            parts.push(&uint8);
+                            let opts = web_sys::BlobPropertyBag::new();
+                            opts.set_type("application/pdf");
+                            if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts) {
+                                if let Some(old) = pdf_blob_url.get_untracked() {
+                                    let _ = web_sys::Url::revoke_object_url(&old);
+                                }
+                                if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                                    set_pdf_blob_url.set(Some(url));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let missing = scan_all_missing_packages(&src, &file_contents, &pkg_cache);
+                            if !missing.is_empty() {
+                                let pkg_names: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
+                                let msg = format!("{}\n\n[MISSING_PACKAGES:{}]", e, pkg_names.join(","));
+                                set_error.set(Some(msg));
+                            } else {
+                                set_error.set(Some(e));
+                            }
+                        }
+                    }
+                    set_is_compiling.set(false);
+                }
+            });
+        });
+    }
+
+    let has_project = move || app_state.current_project.get().is_some();
+    let show_editor = move || app_state.current_project.get().is_some();
+    let show_home = move || app_state.current_project.get().is_none();
+    let app_state_pdf = app_state.clone();
+    let app_state_bib = app_state.clone();
+    let app_state_menu = app_state.clone();
+    let on_save_menu = on_save.clone();
 
     view! {
         <Html attr:lang="en" attr:dir="ltr" attr:data-theme="dark" />
-        <Title text="Typst Studio - Pure Rust WASM" />
+        <Title text="Typst Studio" />
         <Meta charset="UTF-8" />
         <Meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
         <div class="flex flex-col h-screen">
-            // Header con icone Lucide
-            <header class="navbar bg-base-200 shadow-lg min-h-16 px-4">
-                <div class="flex-1 flex items-center gap-3">
-                    <span class="icon-[lucide--file-type] text-2xl text-primary"></span>
-                    <h1 class="text-xl font-bold">"Typst Studio"</h1>
-                    <span class="text-sm text-base-content/60">"(Pure Rust WASM)"</span>
+            // Thin navbar
+            <header class="flex items-center bg-base-200 border-b border-base-300 px-2 h-9 min-h-9 gap-1">
+                <div class="flex items-center gap-1 flex-1 min-w-0">
+                    // Logo + home (always first)
+                    <button class="btn btn-ghost btn-xs px-1" title="Home"
+                        on:click=move |_| {
+                            app_state.current_project.set(None);
+                            app_state.home_tab.set(crate::state::app_state::HomeTab::Projects);
+                        }>
+                        <span class="icon-[lucide--file-type] text-lg text-primary"></span>
+                    </button>
+                    <span class="text-sm font-bold hidden sm:inline">"Typst Studio"</span>
 
-                    // Compilation indicator
+                    // Project switcher (always visible when project open)
                     {move || {
-                        is_compiling
-                            .get()
-                            .then(|| {
-                                view! {
-                                    <span class="flex items-center gap-2 text-sm text-info">
-                                        <span class="loading loading-spinner loading-sm"></span>
-                                        "Compiling..."
-                                    </span>
-                                }
-                            })
+                        app_state.current_project.get().map(|p| {
+                            let name = p.name.clone();
+                            view! {
+                                <button class="btn btn-ghost btn-xs gap-1 text-base-content/60 text-xs"
+                                    on:click=move |_| app_state.show_project_manager.set(true)>
+                                    <span class="icon-[lucide--folder] text-xs"></span>
+                                    {name}
+                                    <span class="icon-[lucide--chevron-down] text-[10px]"></span>
+                                </button>
+                            }
+                        })
                     }}
 
+                    // Menus (only in editor view, after project name)
+                    <Show when=show_editor>
+                        <div class="divider divider-horizontal mx-0 h-4"></div>
+                        <div class="dropdown dropdown-hover">
+                            <div tabindex="0" role="button" class="btn btn-ghost btn-xs px-2 text-xs font-normal">"File"</div>
+                            <ul tabindex="0" class="dropdown-content menu bg-base-200 rounded-box z-50 w-52 p-1 shadow-lg border border-base-300">
+                                <li><a class="text-xs" on:click={
+                                    let save = on_save_menu.clone();
+                                    move |_| save()
+                                }>
+                                    <span class="icon-[lucide--save] text-sm"></span>"Save"
+                                </a></li>
+                                <li><a class="text-xs" on:click=move |_| {
+                                    let content = source.get();
+                                    download_blob(&content, "text/plain;charset=utf-8", "document.typ");
+                                }>
+                                    <span class="icon-[lucide--file-down] text-sm"></span>"Save as .typ"
+                                </a></li>
+                                <li><a class="text-xs">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <span class="icon-[lucide--upload] text-sm"></span>"Open .typ"
+                                        <input type="file" accept=".typ" class="hidden"
+                                            on:change=move |ev| {
+                                                let target = ev.target().unwrap();
+                                                let input = target.dyn_into::<web_sys::HtmlInputElement>().unwrap();
+                                                if let Some(files) = input.files() {
+                                                    if let Some(file) = files.get(0) {
+                                                        let reader = web_sys::FileReader::new().unwrap();
+                                                        let reader_clone = reader.clone();
+                                                        let onload = wasm_bindgen::closure::Closure::wrap(
+                                                            Box::new(move |_: web_sys::Event| {
+                                                                if let Ok(result) = reader_clone.result() {
+                                                                    if let Some(text) = result.as_string() {
+                                                                        set_source.set(text);
+                                                                    }
+                                                                }
+                                                            }) as Box<dyn FnMut(_)>,
+                                                        );
+                                                        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                                                        let _ = reader.read_as_text(&file);
+                                                        onload.forget();
+                                                    }
+                                                }
+                                            }
+                                        />
+                                    </label>
+                                </a></li>
+                                <div class="divider my-0"></div>
+                                <li><a class="text-xs" on:click=move |_| {
+                                    let svg = output.get();
+                                    if !svg.is_empty() && error.get().is_none() {
+                                        download_blob(&svg, "image/svg+xml", "document.svg");
+                                    }
+                                }>
+                                    <span class="icon-[lucide--download] text-sm"></span>"Export SVG"
+                                </a></li>
+                                <li><a class="text-xs" on:click={
+                                    let app_state = app_state_pdf.clone();
+                                    move |_| {
+                                        let src = source.get();
+                                        if src.is_empty() || error.get().is_some() { return; }
+                                        let fc = app_state.file_contents.get();
+                                        let ic = app_state.image_cache.get();
+                                        let mf = app_state.current_project.get()
+                                            .map(|p| p.main_file).unwrap_or_else(|| "main.typ".to_string());
+                                        let ps = app_state.package_cache.get_all_sources();
+                                        let pb = app_state.package_cache.get_all_binaries();
+                                        match TypstCompiler::new().and_then(|c| c.compile_to_pdf(&src, &mf, &fc, &ic, &ps, &pb)) {
+                                            Ok(bytes) => download_bytes(&bytes, "application/pdf", "document.pdf"),
+                                            Err(e) => { log::error!("PDF: {}", e); set_error.set(Some(e)); }
+                                        }
+                                    }
+                                }>
+                                    <span class="icon-[lucide--file-text] text-sm"></span>"Export PDF"
+                                </a></li>
+                            </ul>
+                        </div>
+
+                        <div class="dropdown dropdown-hover">
+                            <div tabindex="0" role="button" class="btn btn-ghost btn-xs px-2 text-xs font-normal">"Edit"</div>
+                            <ul tabindex="0" class="dropdown-content menu bg-base-200 rounded-box z-50 w-52 p-1 shadow-lg border border-base-300">
+                                <li><a class="text-xs" on:click=move |_| set_show_image_gallery.set(true)>
+                                    <span class="icon-[lucide--image] text-sm"></span>"Images"
+                                </a></li>
+                                <li><a class="text-xs" on:click=move |_| set_show_bib_modal.set(true)>
+                                    <span class="icon-[lucide--book-open] text-sm"></span>"Bibliography"
+                                </a></li>
+                            </ul>
+                        </div>
+
+                        <div class="dropdown dropdown-hover">
+                            <div tabindex="0" role="button" class="btn btn-ghost btn-xs px-2 text-xs font-normal">"View"</div>
+                            <ul tabindex="0" class="dropdown-content menu bg-base-200 rounded-box z-50 w-52 p-1 shadow-lg border border-base-300">
+                                <li><a class="text-xs" on:click=move |_| app_state.sidebar_visible.update(|v| *v = !*v)>
+                                    <span class="icon-[lucide--panel-left] text-sm"></span>"Toggle Sidebar"
+                                </a></li>
+                                <li><a class="text-xs" on:click={
+                                    let app_state = app_state_menu.clone();
+                                    move |_| {
+                                        app_state.home_tab.set(crate::state::app_state::HomeTab::Settings);
+                                        app_state.current_project.set(None);
+                                    }
+                                }>
+                                    <span class="icon-[lucide--settings] text-sm"></span>"Settings"
+                                </a></li>
+                            </ul>
+                        </div>
+
+                    </Show>
+
+                    <Show when=move || is_compiling.get()>
+                        <span class="loading loading-spinner loading-xs text-info ml-1"></span>
+                    </Show>
                 </div>
-                <div class="flex-none flex items-center gap-2">
 
-                    // Image Gallery button
-                    <button
-                        class="btn btn-sm btn-ghost gap-2"
-                        on:click=move |_| set_show_image_gallery.set(true)
-                    >
-                        <span class="icon-[lucide--image] text-lg"></span>
-                        "Images"
-                    </button>
-
-                    // Bibliography button
-                    <button
-                        class="btn btn-sm btn-ghost gap-2"
-                        on:click=move |_| set_show_bib_modal.set(true)
-                    >
-                        <span class="icon-[lucide--book-open] text-lg"></span>
-                        "Bibliography"
-                    </button>
-
-                    // Upload .typ file button
-                    <label class="btn btn-sm btn-ghost gap-2 cursor-pointer">
-                        <input
-                            type="file"
-                            accept=".typ"
-                            class="hidden"
-                            on:change=move |ev| {
-                                let target = ev.target().unwrap();
-                                let input = target.dyn_into::<web_sys::HtmlInputElement>().unwrap();
-                                if let Some(files) = input.files() {
-                                    if let Some(file) = files.get(0) {
-                                        let reader = web_sys::FileReader::new().unwrap();
-                                        let reader_clone = reader.clone();
-                                        let onload = wasm_bindgen::closure::Closure::wrap(
-                                            Box::new(move |_: web_sys::Event| {
-                                                if let Ok(result) = reader_clone.result() {
-                                                    if let Some(text) = result.as_string() {
-                                                        set_source.set(text);
-                                                    }
-                                                }
-                                            }) as Box<dyn FnMut(_)>,
-                                        );
-                                        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
-                                        let _ = reader.read_as_text(&file);
-                                        onload.forget();
-                                    }
-                                }
-                            }
-                        />
-                        <span class="icon-[lucide--upload] text-lg"></span>
-                        "Upload"
-                    </label>
-
-                    // Download .typ file button
-                    <button
-                        class="btn btn-sm btn-ghost gap-2"
+                // Right side
+                <div class="flex items-center gap-1">
+                    // Autosave indicator
+                    <Show when=move || has_project() && !app_state.autosave_enabled.get()>
+                        <span class="text-[10px] text-warning opacity-60">"autosave off"</span>
+                    </Show>
+                    <button class="btn btn-ghost btn-xs" title="Settings"
                         on:click=move |_| {
-                            let content = source.get();
-                            if !content.is_empty() {
-                                if let Some(window) = web_sys::window() {
-                                    if let Some(document) = window.document() {
-                                        let blob_parts = js_sys::Array::new();
-                                        blob_parts.push(&wasm_bindgen::JsValue::from_str(&content));
-                                        let blob_options = web_sys::BlobPropertyBag::new();
-                                        blob_options.set_type("text/plain;charset=utf-8");
-                                        if let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(
-                                            &blob_parts,
-                                            &blob_options,
-                                        ) {
-                                            let url = web_sys::Url::create_object_url_with_blob(&blob)
-                                                .unwrap();
-                                            if let Ok(link) = document.create_element("a") {
-                                                let link = link
-                                                    .dyn_into::<web_sys::HtmlAnchorElement>()
-                                                    .unwrap();
-                                                link.set_href(&url);
-                                                link.set_download("document.typ");
-                                                link.click();
-                                                web_sys::Url::revoke_object_url(&url).unwrap();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    >
-                        <span class="icon-[lucide--file-down] text-lg"></span>
-                        "Download"
+                            app_state.home_tab.set(crate::state::app_state::HomeTab::Settings);
+                            app_state.current_project.set(None);
+                        }>
+                        <span class="icon-[lucide--settings] text-sm"></span>
                     </button>
-
-                    // Download SVG button
-                    <button
-                        class="btn btn-sm btn-ghost gap-2"
-                        on:click=move |_| {
-                            let svg_content = output.get();
-                            if !svg_content.is_empty() && error.get().is_none() {
-                                if let Some(window) = web_sys::window() {
-                                    if let Some(document) = window.document() {
-                                        let blob_parts = js_sys::Array::new();
-                                        blob_parts
-                                            .push(&wasm_bindgen::JsValue::from_str(&svg_content));
-                                        if let Ok(blob) = web_sys::Blob::new_with_str_sequence(
-                                            &blob_parts,
-                                        ) {
-                                            let url = web_sys::Url::create_object_url_with_blob(&blob)
-                                                .unwrap();
-                                            if let Ok(link) = document.create_element("a") {
-                                                let link = link
-                                                    .dyn_into::<web_sys::HtmlAnchorElement>()
-                                                    .unwrap();
-                                                link.set_href(&url);
-                                                link.set_download("document.svg");
-                                                link.click();
-                                                web_sys::Url::revoke_object_url(&url).unwrap();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    >
-                        <span class="icon-[lucide--download] text-lg"></span>
-                        "SVG"
-                    </button>
-
-                    // Download PDF button
-                    <button
-                        class="btn btn-sm btn-ghost gap-2"
-                        on:click=move |_| {
-                            let src = source.get();
-                            if !src.is_empty() && error.get().is_none() {
-                                let bib = bibliography.get();
-                                let bib_option = if bib.is_empty() {
-                                    None
-                                } else {
-                                    Some(bib.as_str())
-                                };
-                                let images = image_cache.get();
-                                match TypstCompiler::new()
-                                    .and_then(|c| c.compile_to_pdf(&src, bib_option, &images))
-                                {
-                                    Ok(pdf_bytes) => {
-                                        if let Some(window) = web_sys::window() {
-                                            if let Some(document) = window.document() {
-                                                let uint8_array = js_sys::Uint8Array::from(&pdf_bytes[..]);
-                                                let blob_parts = js_sys::Array::new();
-                                                blob_parts.push(&uint8_array);
-                                                let blob_options = web_sys::BlobPropertyBag::new();
-                                                blob_options.set_type("application/pdf");
-                                                if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(
-                                                    &blob_parts,
-                                                    &blob_options,
-                                                ) {
-                                                    let url = web_sys::Url::create_object_url_with_blob(&blob)
-                                                        .unwrap();
-                                                    if let Ok(link) = document.create_element("a") {
-                                                        let link = link
-                                                            .dyn_into::<web_sys::HtmlAnchorElement>()
-                                                            .unwrap();
-                                                        link.set_href(&url);
-                                                        link.set_download("document.pdf");
-                                                        link.click();
-                                                        web_sys::Url::revoke_object_url(&url).unwrap();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("PDF compilation failed: {}", e);
-                                        set_error.set(Some(e));
-                                    }
-                                }
-                            }
-                        }
-                    >
-                        <span class="icon-[lucide--file-text] text-lg"></span>
-                        "PDF"
-                    </button>
-
-                    // Theme toggle
-                    <label class="swap swap-rotate">
-                        // Hidden checkbox controls theme state
-                        <input
-                            type="checkbox"
-                            class="theme-controller"
-                            checked=is_dark_theme
-                            on:change=move |_| set_is_dark_theme.update(|v| *v = !*v)
-                        />
-
-                        // Sun icon (light mode - shown when dark theme is OFF)
-                        <svg
-                            class="swap-off h-8 w-8 fill-current"
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                        >
-                            <path d="M5.64,17l-.71.71a1,1,0,0,0,0,1.41,1,1,0,0,0,1.41,0l.71-.71A1,1,0,0,0,5.64,17ZM5,12a1,1,0,0,0-1-1H3a1,1,0,0,0,0,2H4A1,1,0,0,0,5,12Zm7-7a1,1,0,0,0,1-1V3a1,1,0,0,0-2,0V4A1,1,0,0,0,12,5ZM5.64,7.05a1,1,0,0,0,.7.29,1,1,0,0,0,.71-.29,1,1,0,0,0,0-1.41l-.71-.71A1,1,0,0,0,4.93,6.34Zm12,.29a1,1,0,0,0,.7-.29l.71-.71a1,1,0,1,0-1.41-1.41L17,5.64a1,1,0,0,0,0,1.41A1,1,0,0,0,17.66,7.34ZM21,11H20a1,1,0,0,0,0,2h1a1,1,0,0,0,0-2Zm-9,8a1,1,0,0,0-1,1v1a1,1,0,0,0,2,0V20A1,1,0,0,0,12,19ZM18.36,17A1,1,0,0,0,17,18.36l.71.71a1,1,0,0,0,1.41,0,1,1,0,0,0,0-1.41ZM12,6.5A5.5,5.5,0,1,0,17.5,12,5.51,5.51,0,0,0,12,6.5Zm0,9A3.5,3.5,0,1,1,15.5,12,3.5,3.5,0,0,1,12,15.5Z" />
-                        </svg>
-
-                        // Moon icon (dark mode - shown when dark theme is ON)
-                        <svg
-                            class="swap-on h-8 w-8 fill-current"
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                        >
-                            <path d="M21.64,13a1,1,0,0,0-1.05-.14,8.05,8.05,0,0,1-3.37.73A8.15,8.15,0,0,1,9.08,5.49a8.59,8.59,0,0,1,.25-2A1,1,0,0,0,8,2.36,10.14,10.14,0,1,0,22,14.05,1,1,0,0,0,21.64,13Zm-9.5,6.69A8.14,8.14,0,0,1,7.08,5.22v.27A10.15,10.15,0,0,0,17.22,15.63a9.79,9.79,0,0,0,2.1-.22A8.11,8.11,0,0,1,12.14,19.73Z" />
-                        </svg>
-                    </label>
                 </div>
             </header>
 
-            // Main layout con split panels
-            <main
-                class="flex-1 flex overflow-hidden relative min-h-0"
-                on:mousemove=move |ev| {
-                    if is_resizing.get() {
-                        if let Some(window) = web_sys::window() {
-                            let width = window.inner_width().unwrap().as_f64().unwrap();
-                            let x = ev.client_x() as f64;
-                            let percentage = (x / width) * 100.0;
-                            // Limit between 20% and 80%
-                            let clamped = percentage.clamp(20.0, 80.0);
-                            set_editor_width.set(clamped);
+            // Main content: editor / home (home includes settings + packages)
+            <Show when=show_editor>
+                <main
+                    class="flex-1 flex overflow-hidden relative min-h-0"
+                    on:mousemove=move |ev| {
+                        if is_resizing.get() {
+                            if let Some(window) = web_sys::window() {
+                                let sw = if app_state.sidebar_visible.get_untracked() { app_state.sidebar_width.get_untracked() } else { 0.0 };
+                                let w = window.inner_width().unwrap().as_f64().unwrap() - sw;
+                                let x = ev.client_x() as f64 - sw;
+                                set_editor_width.set(((x / w) * 100.0).clamp(20.0, 80.0));
+                            }
                         }
                     }
-                }
-                on:mouseup=move |_| {
-                    set_is_resizing.set(false);
-                }
-            >
-                // Editor panel with dynamic width
-                <div
-                    class="overflow-hidden flex flex-col"
-                    style:flex=move || format!("0 0 {}%", editor_width.get())
+                    on:mouseup=move |_| set_is_resizing.set(false)
                 >
-                    <Editor
-                        source=source
-                        set_source=set_source
-                        textarea_ref=textarea_ref
-                        insert_at_cursor=insert_at_cursor.clone()
-                    />
-                </div>
+                    <FileSidebar />
+                    <div class="overflow-hidden flex flex-col"
+                        style:flex=move || format!("0 0 {}%", editor_width.get())>
+                        <EditorTabs />
+                        <Editor source=source set_source=set_source
+                            textarea_ref=textarea_ref insert_at_cursor=insert_at_cursor.clone()
+                            on_save=on_save.clone() on_compile=on_compile.clone()
+                            set_cursor_ratio=set_cursor_ratio />
+                    </div>
+                    <div class="w-1 bg-base-300 hover:bg-primary cursor-col-resize transition-colors relative group"
+                        on:mousedown=move |ev| { ev.prevent_default(); set_is_resizing.set(true); }>
+                        <div class="absolute inset-y-0 -left-1 -right-1 group-hover:bg-primary/20"></div>
+                    </div>
+                    <div class="flex-1 min-h-0">
+                        <Preview output=output error=error
+                            pdf_blob_url=pdf_blob_url cursor_ratio=cursor_ratio />
+                    </div>
+                </main>
+            </Show>
 
-                // Resizer handle
-                <div
-                    class="w-1 bg-base-300 hover:bg-primary cursor-col-resize transition-colors relative group"
-                    on:mousedown=move |ev| {
-                        ev.prevent_default();
-                        set_is_resizing.set(true);
-                    }
-                >
-                    // Visual indicator on hover
-                    <div class="absolute inset-y-0 -left-1 -right-1 group-hover:bg-primary/20"></div>
-                </div>
-
-                // Preview panel with remaining width
-                <div class="flex-1 min-h-0">
-                    <Preview output=output error=error />
-                </div>
-            </main>
+            <Show when=show_home>
+                <HomePage set_source=set_source set_bib_content=set_bib_content />
+            </Show>
 
             // Bibliography modal
-            {move || {
-                show_bib_modal
-                    .get()
-                    .then(|| {
-                        view! {
-                            <div class="modal modal-open">
-                                <div class="modal-box max-w-4xl">
-                                    <h3 class="font-bold text-lg flex items-center gap-2">
-                                        <span class="icon-[lucide--book-open] text-xl"></span>
-                                        "Bibliography Manager (YAML)"
-                                    </h3>
-                                    <p class="py-2 text-sm text-base-content/70">
-                                        "Edit your bibliography in Hayagriva YAML format. The file will be registered as 'refs.yml' for your documents."
-                                    </p>
-
-                                    <div class="form-control">
-                                        <label class="label">
-                                            <span class="label-text">"Bibliography YAML (refs.yml)"</span>
-                                        </label>
-                                        <textarea
-                                            class="textarea textarea-bordered h-96 font-mono text-sm"
-                                            prop:value=move || bibliography.get()
-                                            on:input=move |ev| {
-                                                set_bibliography.set(event_target_value(&ev));
+            <Show when=move || show_bib_modal.get()>
+                <div class="modal modal-open">
+                    <div class="modal-box max-w-4xl">
+                        <h3 class="font-bold text-lg flex items-center gap-2">
+                            <span class="icon-[lucide--book-open] text-xl"></span>
+                            "Bibliography (YAML)"
+                        </h3>
+                        <div class="form-control mt-2">
+                            <textarea
+                                class="textarea textarea-bordered h-96 font-mono text-sm"
+                                prop:value=move || bib_content.get()
+                                on:input=move |ev| set_bib_content.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <div class="modal-action">
+                            <button class="btn btn-primary btn-sm gap-2"
+                                on:click={
+                                    let app_state = app_state_bib.clone();
+                                    move |_| {
+                                        let bib = bib_content.get();
+                                        app_state.file_contents.update(|map| {
+                                            map.insert("refs.yml".to_string(), bib.clone());
+                                        });
+                                        if let Some(project) = app_state.current_project.get_untracked() {
+                                            let storage = app_state.storage.clone();
+                                            spawn_local(async move {
+                                                let _ = storage.write_file(&project.id, "refs.yml",
+                                                    &crate::models::FileContent::Text(bib)).await;
+                                            });
+                                        }
+                                        app_state.project_files.update(|files| {
+                                            if !files.contains(&"refs.yml".to_string()) {
+                                                files.push("refs.yml".to_string());
                                             }
-                                            placeholder="key:\n  type: article\n  title: \"Title\"\n  author: [\"Author\"]\n  date: 2024"
-                                        />
-                                    </div>
+                                        });
+                                        set_show_bib_modal.set(false);
+                                    }
+                                }
+                            >
+                                <span class="icon-[lucide--save] text-sm"></span>"Save"
+                            </button>
+                            <button class="btn btn-ghost btn-sm" on:click=move |_| set_show_bib_modal.set(false)>"Cancel"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
 
-                                    <div class="alert alert-info mt-4">
-                                        <span class="icon-[lucide--info] text-xl"></span>
-                                        <div class="text-sm">
-                                            <p class="font-bold">"Usage:"</p>
-                                            <ul class="list-disc list-inside mt-1">
-                                                <li>"Use @key to cite entries in your document"</li>
-                                                <li>"Add #bibliography(\"refs.yml\") at the end of your document"</li>
-                                                <li>"Changes are saved automatically to localStorage"</li>
-                                            </ul>
-                                        </div>
-                                    </div>
-
-                                    <div class="modal-action">
-                                        <button
-                                            class="btn btn-primary gap-2"
-                                            on:click=move |_| {
-                                                // Save bibliography to localStorage
-                                                if let Some(window) = web_sys::window() {
-                                                    if let Ok(Some(storage)) = window.local_storage() {
-                                                        let _ = storage.set_item("typst_bibliography", &bibliography.get());
-                                                        log::info!("Bibliography saved to localStorage");
-                                                    }
-                                                }
-                                                set_show_bib_modal.set(false);
-                                            }
-                                        >
-                                            <span class="icon-[lucide--save] text-lg"></span>
-                                            "Save & Close"
-                                        </button>
-                                        <button
-                                            class="btn btn-ghost"
-                                            on:click=move |_| set_show_bib_modal.set(false)
-                                        >
-                                            "Cancel"
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        }
-                    })
-            }}
-
-            // Image Gallery Drawer
-            <ImageGalleryDrawer
-                show=show_image_gallery
-                set_show=set_show_image_gallery
-                set_image_cache=set_image_cache
-            />
+            <ImageGalleryDrawer show=show_image_gallery set_show=set_show_image_gallery
+                set_image_cache=set_legacy_image_cache />
+            <ProjectSwitcher set_source=set_source set_bib_content=set_bib_content />
         </div>
+    }
+}
+
+fn download_blob(content: &str, mime: &str, filename: &str) {
+    if content.is_empty() { return; }
+    if let Some(window) = web_sys::window() {
+        if let Some(document) = window.document() {
+            let parts = js_sys::Array::new();
+            parts.push(&wasm_bindgen::JsValue::from_str(content));
+            let opts = web_sys::BlobPropertyBag::new();
+            opts.set_type(mime);
+            if let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts) {
+                if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                    if let Ok(link) = document.create_element("a") {
+                        let link = link.dyn_into::<web_sys::HtmlAnchorElement>().unwrap();
+                        link.set_href(&url);
+                        link.set_download(filename);
+                        link.click();
+                        let _ = web_sys::Url::revoke_object_url(&url);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Scan the main source and all project files for package imports.
+/// Extracts `@namespace/name:version` from `#import` statements.
+/// Filters out file imports (no `@` prefix) and already-installed packages.
+fn scan_all_missing_packages(
+    main_source: &str,
+    file_contents: &HashMap<String, String>,
+    cache: &crate::packages::PackageCache,
+) -> Vec<crate::packages::PkgSpec> {
+    let mut missing = Vec::new();
+
+    // Scan main source
+    extract_package_imports(main_source, cache, &mut missing);
+
+    // Scan all other project .typ files
+    for (path, content) in file_contents {
+        if path.ends_with(".typ") {
+            extract_package_imports(content, cache, &mut missing);
+        }
+    }
+
+    missing
+}
+
+/// Extract `@namespace/name:version` package specs from source text.
+/// Ignores file imports like `#import "file.typ"`.
+fn extract_package_imports(
+    source: &str,
+    cache: &crate::packages::PackageCache,
+    out: &mut Vec<crate::packages::PkgSpec>,
+) {
+    // Find all @namespace/name:version patterns anywhere in the text.
+    // These appear in: #import "@preview/pkg:ver", #import "@preview/pkg:ver": items
+    // We look for the pattern `"@` followed by `namespace/name:major.minor.patch"`
+    let mut search = source;
+    while let Some(at_pos) = search.find("\"@") {
+        let rest = &search[at_pos + 1..]; // skip the opening quote, start at @
+        // Find the closing quote
+        if let Some(quote_end) = rest.find('"') {
+            let spec_str = &rest[..quote_end]; // e.g. @preview/cetz:0.3.0
+            // Only process if it looks like a package (has @ and namespace/name:version)
+            if spec_str.starts_with('@') && spec_str.contains('/') {
+                if let Some(spec) = crate::packages::PkgSpec::parse(spec_str) {
+                    if !cache.has_package(&spec) && !out.iter().any(|m| m.to_string() == spec.to_string()) {
+                        out.push(spec);
+                    }
+                }
+            }
+        }
+        // Move past this match to find more
+        search = &search[at_pos + 2..];
+    }
+}
+
+fn download_bytes(bytes: &[u8], mime: &str, filename: &str) {
+    if let Some(window) = web_sys::window() {
+        if let Some(document) = window.document() {
+            let uint8 = js_sys::Uint8Array::from(bytes);
+            let parts = js_sys::Array::new();
+            parts.push(&uint8);
+            let opts = web_sys::BlobPropertyBag::new();
+            opts.set_type(mime);
+            if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts) {
+                if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                    if let Ok(link) = document.create_element("a") {
+                        let link = link.dyn_into::<web_sys::HtmlAnchorElement>().unwrap();
+                        link.set_href(&url);
+                        link.set_download(filename);
+                        link.click();
+                        let _ = web_sys::Url::revoke_object_url(&url);
+                    }
+                }
+            }
+        }
     }
 }
