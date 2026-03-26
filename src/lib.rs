@@ -260,11 +260,13 @@ pub fn App() -> impl IntoView {
                     }
                 }
             } else if let Some(e) = resp.error {
-                // Check for missing packages
+                // Check for missing packages in ALL project files
                 let src = source.get_untracked();
                 let file_contents = app_state_w.file_contents.get_untracked();
                 let pkg_cache = app_state_w.package_cache.clone();
                 let missing = scan_all_missing_packages(&src, &file_contents, &pkg_cache);
+                log::info!("Compilation error. Missing packages detected: {}", missing.len());
+                for m in &missing { log::info!("  missing: {}", m.to_string()); }
                 if !missing.is_empty() {
                     let pkg_names: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
                     let msg = format!("{}\n\n[MISSING_PACKAGES:{}]", e, pkg_names.join(","));

@@ -192,50 +192,57 @@ impl CompileWorkerHandle {
         worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
         // Initialize worker with WASM URLs
-        // Trunk generates files like: wasm-typst-studio-rs-HASH.js and _bg.wasm
-        // We need to find the actual URLs
+        // Trunk generates: <link rel="modulepreload" href="/wasm-typst-studio-rs-HASH.js">
+        // and the WASM file is the same name with _bg.wasm
         if let Some(window) = web_sys::window() {
-            let base = window.location().origin().unwrap_or_default();
-            // Find the JS and WASM file URLs from the document's scripts
             if let Some(document) = window.document() {
-                // The Trunk-generated JS is loaded as a module script
-                // We can find it by looking for script tags or by convention
-                let scripts = document.query_selector_all("script[type='module']").ok();
                 let mut js_url = String::new();
-                if let Some(scripts) = scripts {
-                    for i in 0..scripts.length() {
-                        if let Some(el) = scripts.item(i) {
-                            if let Some(src) = el.dyn_ref::<web_sys::HtmlScriptElement>() {
-                                let s = src.src();
-                                if s.contains("wasm-typst-studio") {
-                                    js_url = s;
-                                    break;
+
+                // Find the modulepreload link that Trunk generates
+                if let Ok(links) = document.query_selector_all("link[rel='modulepreload']") {
+                    for i in 0..links.length() {
+                        if let Some(el) = links.item(i) {
+                            if let Ok(href) = el.dyn_into::<web_sys::Element>() {
+                                if let Some(h) = href.get_attribute("href") {
+                                    if h.contains("wasm-typst-studio") && h.ends_with(".js") {
+                                        js_url = h;
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
+                // Fallback: look for preload link for the .wasm file and derive the JS URL
                 if js_url.is_empty() {
-                    // Fallback: scan document for the JS URL pattern
-                    let html = document.document_element().map(|e| e.inner_html()).unwrap_or_default();
-                    if let Some(start) = html.find("wasm-typst-studio-rs-") {
-                        if let Some(end) = html[start..].find(".js") {
-                            let filename = &html[start..start + end + 3];
-                            js_url = format!("{}/{}", base, filename);
+                    if let Ok(links) = document.query_selector_all("link[rel='preload'][as='fetch']") {
+                        for i in 0..links.length() {
+                            if let Some(el) = links.item(i) {
+                                if let Ok(href) = el.dyn_into::<web_sys::Element>() {
+                                    if let Some(h) = href.get_attribute("href") {
+                                        if h.contains("wasm-typst-studio") && h.ends_with("_bg.wasm") {
+                                            js_url = h.replace("_bg.wasm", ".js");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
                 if !js_url.is_empty() {
                     let wasm_url = js_url.replace(".js", "_bg.wasm");
+                    log::info!("Worker init: JS={}, WASM={}", js_url, wasm_url);
                     let init_msg = js_sys::Object::new();
                     let _ = js_sys::Reflect::set(&init_msg, &"type".into(), &"init".into());
                     let _ = js_sys::Reflect::set(&init_msg, &"jsUrl".into(), &JsValue::from_str(&js_url));
                     let _ = js_sys::Reflect::set(&init_msg, &"wasmUrl".into(), &JsValue::from_str(&wasm_url));
                     let _ = worker.post_message(&init_msg);
                 } else {
-                    log::warn!("Could not find WASM JS glue URL for worker");
+                    log::warn!("Could not find WASM JS glue URL for worker — compilation will be on main thread");
+                    return None;
                 }
             }
         }
