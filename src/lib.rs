@@ -140,7 +140,11 @@ pub fn App() -> impl IntoView {
             let autosave = app_state.autosave_enabled.get();
             let active = app_state.active_file.get_untracked();
             if let Some(path) = active {
-                // Always update in-memory content
+                // Only update if content actually changed to avoid spurious modified markers
+                let current = app_state.file_contents.get_untracked();
+                if current.get(&path).map(|c| c == &src).unwrap_or(false) {
+                    return;
+                }
                 app_state.set_file_content(&path, src.clone());
                 // Only persist to storage if autosave is on
                 if autosave {
@@ -303,6 +307,7 @@ pub fn App() -> impl IntoView {
             let _file_ver = app_state.file_contents.get();
             let _img_ver = app_state.image_cache.get();
             let _pkg_ver = app_state.package_cache.packages.get();
+            // Always compile from the project's main file (entry point)
             let main_file = app_state.current_project.get_untracked()
                 .map(|p| p.main_file).unwrap_or_else(|| "main.typ".to_string());
 
@@ -315,11 +320,14 @@ pub fn App() -> impl IntoView {
 
                 set_is_compiling.set(true);
 
-                // Clone data AFTER debounce
+                // Clone data AFTER debounce so we get the latest content
                 let file_contents = app_state2.file_contents.get_untracked();
                 let image_cache = app_state2.image_cache.get_untracked();
                 let pkg_sources = app_state2.package_cache.get_all_sources();
                 let pkg_binaries = app_state2.package_cache.get_all_binaries();
+
+                // Use the main file's latest content (autosave keeps file_contents current)
+                let compile_src = file_contents.get(&main_file).cloned().unwrap_or(src);
 
                 if let Some(ref worker) = *compile_worker {
                     // OFF-THREAD: send to worker, result comes back via callback
@@ -328,7 +336,7 @@ pub fn App() -> impl IntoView {
                     set_compile_id_counter.set(req_id);
                     let request = CompileRequest {
                         id: req_id,
-                        source: src,
+                        source: compile_src,
                         main_file,
                         file_contents,
                         image_cache,
@@ -341,7 +349,7 @@ pub fn App() -> impl IntoView {
                     // FALLBACK: compile on main thread (blocks UI)
                     let pkg_cache = app_state2.package_cache.clone();
                     match TypstCompiler::new()
-                        .and_then(|c| c.compile_to_both(&src, &main_file, &file_contents, &image_cache, &pkg_sources, &pkg_binaries))
+                        .and_then(|c| c.compile_to_both(&compile_src, &main_file, &file_contents, &image_cache, &pkg_sources, &pkg_binaries))
                     {
                         Ok((svg, pdf_bytes)) => {
                             set_output.set(svg);
@@ -361,7 +369,7 @@ pub fn App() -> impl IntoView {
                             }
                         }
                         Err(e) => {
-                            let missing = scan_all_missing_packages(&src, &file_contents, &pkg_cache);
+                            let missing = scan_all_missing_packages(&compile_src, &file_contents, &pkg_cache);
                             if !missing.is_empty() {
                                 let pkg_names: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
                                 let msg = format!("{}\n\n[MISSING_PACKAGES:{}]", e, pkg_names.join(","));
@@ -483,8 +491,12 @@ pub fn App() -> impl IntoView {
                                         if src.is_empty() || error.get().is_some() { return; }
                                         let fc = app_state.file_contents.get();
                                         let ic = app_state.image_cache.get();
-                                        let mf = app_state.current_project.get()
-                                            .map(|p| p.main_file).unwrap_or_else(|| "main.typ".to_string());
+                                        // Use active file as main_file
+                                        let mf = app_state.active_file.get()
+                                            .unwrap_or_else(|| {
+                                                app_state.current_project.get()
+                                                    .map(|p| p.main_file).unwrap_or_else(|| "main.typ".to_string())
+                                            });
                                         let ps = app_state.package_cache.get_all_sources();
                                         let pb = app_state.package_cache.get_all_binaries();
                                         match TypstCompiler::new().and_then(|c| c.compile_to_pdf(&src, &mf, &fc, &ic, &ps, &pb)) {

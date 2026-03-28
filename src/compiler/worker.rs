@@ -114,6 +114,7 @@ impl CompileWorkerHandle {
     pub fn spawn(on_result: impl Fn(CompileResponse) + 'static) -> Option<Self> {
         // Create inline worker script that loads our WASM module
         // The worker.js imports the same wasm-bindgen JS glue and calls compile_in_worker
+        // Note: main.rs has a DOM check that prevents Leptos from initializing in worker context
         let worker_code = r#"
             let wasmModule = null;
 
@@ -133,6 +134,13 @@ impl CompileWorkerHandle {
                 }
 
                 if (msg.type === 'compile') {
+                    if (!wasmModule) {
+                        self.postMessage({ type: 'result', resultJson: JSON.stringify({
+                            id: 0, svg: null, pdf_base64: null,
+                            error: 'Worker not initialized. WASM module failed to load.'
+                        })});
+                        return;
+                    }
                     try {
                         const result = wasmModule.compile_in_worker(msg.requestJson);
                         self.postMessage({ type: 'result', resultJson: result });
@@ -233,11 +241,21 @@ impl CompileWorkerHandle {
                 }
 
                 if !js_url.is_empty() {
-                    let wasm_url = js_url.replace(".js", "_bg.wasm");
-                    log::info!("Worker init: JS={}, WASM={}", js_url, wasm_url);
+                    // Convert relative URLs to absolute URLs to work from any origin
+                    let location = window.location();
+                    let origin = location.origin().unwrap_or_default();
+                    let js_url_abs = if js_url.starts_with("http") {
+                        js_url.clone()
+                    } else if js_url.starts_with("/") {
+                        format!("{}{}", origin, js_url)
+                    } else {
+                        format!("{}/{}", origin, js_url)
+                    };
+                    let wasm_url = js_url_abs.replace(".js", "_bg.wasm");
+                    log::info!("Worker init: JS={}, WASM={}", js_url_abs, wasm_url);
                     let init_msg = js_sys::Object::new();
                     let _ = js_sys::Reflect::set(&init_msg, &"type".into(), &"init".into());
-                    let _ = js_sys::Reflect::set(&init_msg, &"jsUrl".into(), &JsValue::from_str(&js_url));
+                    let _ = js_sys::Reflect::set(&init_msg, &"jsUrl".into(), &JsValue::from_str(&js_url_abs));
                     let _ = js_sys::Reflect::set(&init_msg, &"wasmUrl".into(), &JsValue::from_str(&wasm_url));
                     let _ = worker.post_message(&init_msg);
                 } else {

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/ubuntu/git/wasm-typst-studio-rs/src/components/**)",
+      "Read(//home/ubuntu/git_local/git/wasm-typst-studio-rs/src/components/**)",
+      "Bash(find ~/.cargo -name *.rs)",
+      "Bash(npx chrome-devtools-mcp@latest --help)",
+      "Bash(nvm list:*)",
+      "Bash(trunk build:*)"
+    ]
+  },
+  "enabledPlugins": {
+    "chrome-devtools-mcp@chrome-devtools-plugins": true
+  }
+}

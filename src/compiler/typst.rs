@@ -101,9 +101,9 @@ impl TypstCompiler {
         }
     }
 
-    fn build_engine(source: &str, p: &PreparedFiles) -> TypstEngine<TypstTemplateMainFile> {
+    fn build_engine(source: &str, main_file: &str, p: &PreparedFiles) -> TypstEngine<TypstTemplateMainFile> {
         let mut b = TypstEngine::builder()
-            .main_file(source)
+            .main_file((main_file, source.to_owned()))
             .search_fonts_with(
                 TypstKitFontOptions::default()
                     .include_system_fonts(false)
@@ -163,7 +163,7 @@ impl TypstCompiler {
     ) -> Result<(String, Vec<u8>), String> {
         if source.trim().is_empty() { return Err("Source code is empty".to_string()); }
         let p = Self::prepare_files(fc, ic, main_file, ps, pb);
-        let engine = Self::build_engine(source, &p);
+        let engine = Self::build_engine(source, main_file, &p);
         match engine.compile::<typst::layout::PagedDocument>().output {
             Ok(doc) => {
                 // Generate SVG
@@ -189,7 +189,7 @@ impl TypstCompiler {
     ) -> Result<String, String> {
         if source.trim().is_empty() { return Err("Source code is empty".to_string()); }
         let p = Self::prepare_files(fc, ic, main_file, ps, pb);
-        let engine = Self::build_engine(source, &p);
+        let engine = Self::build_engine(source, main_file, &p);
         match engine.compile::<typst::layout::PagedDocument>().output {
             Ok(doc) => {
                 let mut svg = String::new();
@@ -211,7 +211,7 @@ impl TypstCompiler {
     ) -> Result<Vec<u8>, String> {
         if source.trim().is_empty() { return Err("Source code is empty".to_string()); }
         let p = Self::prepare_files(fc, ic, main_file, ps, pb);
-        let engine = Self::build_engine(source, &p);
+        let engine = Self::build_engine(source, main_file, &p);
         match engine.compile::<typst::layout::PagedDocument>().output {
             Ok(doc) => typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default())
                 .map_err(|e| format!("PDF error: {:?}", e)),

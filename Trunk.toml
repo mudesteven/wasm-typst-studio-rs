@@ -34,7 +34,7 @@ ignore = []
 
 [serve]
 # The address to serve on.
-addresses = ["127.0.0.1"]
+addresses = ["192.168.193.23","127.0.0.1"]
 # The port to serve on (changed to 1420 for Tauri compatibility)
 port = 1420
 # Protocol used for autoreload WebSockets connection (required for Tauri mobile dev)
@@ -52,7 +52,7 @@ open = false
 # Disable error reporting
 # no_error_reporting = false
 # Additional headers set for responses.
-# headers = { "test-header" = "header value", "test-header2" = "header value 2" }
+headers = { "Access-Control-Allow-Origin" = "*" }
 # Protocol used for autoreload WebSockets connection.
 # ws_protocol = "ws"
 # The certificate/private key pair to use for TLS, which is enabled if both are set.
